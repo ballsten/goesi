@@ -2,6 +2,8 @@ package goesi
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -121,6 +123,39 @@ func (c *SSOAuthenticator) AuthorizeURL(state string, onlineAccess bool, scopes 
 	return url
 }
 
+// AuthorizeURLPCKE utilising the PKCE flow returns a url for an end user to authenticate with EVE SSO
+// and return success to the redirectURL.
+// https://docs.esi.evetech.net/docs/sso/native_sso_flow.html
+// It is important to create a significatly unique state for this request
+// and verify the state matches when returned to the redirectURL.
+// The returned codeVerifier value must be retained for the TokenExchangePKCE function
+func (c *SSOAuthenticator) AuthorizeURLPKCE(state string, onlineAccess bool, scopes []string) (url string, codeVerifier string) {
+	// generate a random 32 byte codeVerifier
+	b := make([]byte, 32)
+	rand.Read(b)
+	codeVerifier = base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b)
+
+	h := sha256.New()
+	h.Write([]byte(codeVerifier))
+	codeChallenge := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(h.Sum(nil))
+
+	optScope := oauth2.SetAuthURLParam("scope", strings.Join(scopes, " "))
+	optChallenge := oauth2.SetAuthURLParam("code_challenge", codeChallenge)
+	optChallengeMethod := oauth2.SetAuthURLParam("code_challenge_method", "S256")
+
+	var optAccessType oauth2.AuthCodeOption
+	// Generate the URL
+	if onlineAccess {
+		optAccessType = oauth2.AccessTypeOnline
+	} else {
+		optAccessType = oauth2.AccessTypeOffline
+	}
+
+	url = c.oauthConfig.AuthCodeURL(state, optAccessType, optScope, optChallenge, optChallengeMethod)
+
+	return url, codeVerifier
+}
+
 // TokenRevoke revokes a refresh token
 func (c *SSOAuthenticator) TokenRevoke(refreshToken string) error {
 	v := url.Values{
@@ -161,6 +196,17 @@ func (c *SSOAuthenticator) TokenRevoke(refreshToken string) error {
 // This client MUST cache per CCP guidelines or face banning.
 func (c *SSOAuthenticator) TokenExchange(code string) (*oauth2.Token, error) {
 	tok, err := c.oauthConfig.Exchange(createContext(c.httpClient), code)
+	if err != nil {
+		return nil, err
+	}
+	return tok, nil
+}
+
+// TokenExchangePKCE exchanges the code and codeVerifier returned to the redirectURL with
+// the CREST server to an access token. A caching client must be passed.
+// This client MUST cache per CCP guidelines or face banning.
+func (c *SSOAuthenticator) TokenExchangePKCE(code string, codeVerifier string) (*oauth2.Token, error) {
+	tok, err := c.oauthConfig.Exchange(createContext(c.httpClient), code, oauth2.SetAuthURLParam("code_verifier", codeVerifier))
 	if err != nil {
 		return nil, err
 	}
